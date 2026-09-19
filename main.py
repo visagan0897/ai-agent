@@ -18,6 +18,8 @@ from remediation.executor import RemediationExecutor
 
 from verification.verifier import IncidentVerifier
 
+from database import save_incident, save_resolution
+
 
 app = FastAPI(
     title="AI Incident Resolution Agent",
@@ -26,12 +28,13 @@ app = FastAPI(
 )
 
 
-# Allow the React frontend to communicate with the backend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:5173",
         "http://127.0.0.1:5173",
+        "http://localhost:5175",
+        "http://127.0.0.1:5175",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -52,7 +55,6 @@ monitoring_pipeline = MonitoringPipeline()
 correlation_pipeline = CorrelationPipeline()
 
 
-# Remediation
 action_registry = create_action_registry()
 
 action_planner = ActionPlanner()
@@ -61,12 +63,9 @@ remediation_executor = RemediationExecutor(
     action_registry
 )
 
-
-# Verification
 incident_verifier = IncidentVerifier()
 
 
-# Capabilities available to the AI
 ai_capabilities = [
     {
         "action_id": "recover_payment_service",
@@ -74,6 +73,7 @@ ai_capabilities = [
         "autonomous": True,
     }
 ]
+
 
 ai_decision_engine = AIDecisionEngine(
     capabilities=ai_capabilities
@@ -95,7 +95,10 @@ async def analyze_incident(incident: IncidentRequest):
 
 @app.get("/observe/{service}")
 async def observe_service(service: str):
-    return await enterprise_monitor.collect(service)
+
+    evidence = await enterprise_monitor.collect(service)
+
+    return evidence
 
 
 @app.get("/detect/{service}")
@@ -136,6 +139,9 @@ async def correlate_incident(service: str):
         evidence=evidence,
     )
 
+    for incident in correlation_result["incidents"]:
+        save_incident(incident)
+
     return {
         "service": service,
         "alert_count": len(alerts),
@@ -175,25 +181,30 @@ async def investigate_incident(service: str):
 
     for incident in correlation_result["incidents"]:
 
-        # 1. AI Investigation + Decision
+        save_incident(incident)
+
         ai_decision = await ai_decision_engine.decide(
             incident
         )
 
-        # 2. Create executable action request
         action_request = action_planner.plan(
             ai_decision
         )
 
-        # 3. Execute through controlled registry
         execution_result = await remediation_executor.execute(
             action_request
         )
 
-        # 4. Verify actual service state
         verification_result = await incident_verifier.verify(
             service,
             "http://127.0.0.1:8002/health",
+        )
+
+        save_resolution(
+            incident_id=incident.incident_id,
+            ai_decision=ai_decision,
+            execution_result=execution_result,
+            verification_result=verification_result,
         )
 
         results.append({
